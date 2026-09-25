@@ -1,0 +1,24 @@
+{
+  "package": "qpf-bhu-anomaly-receipt",
+  "version": "v1",
+  "pinned": "2026-09-24",
+  "which_version": "Gaztanaga-BHU-2022-2026",
+  "cells": {
+    "C_theta_gt_60": "PRE-EXISTING_DATUM",
+    "theta_cut": "ACCOMMODATION",
+    "C2": "UNDERDETERMINED",
+    "S1_S7": "LOCKED",
+    "P_R": "UNCOMPUTED",
+    "DSI": "OTHER_ROW",
+    "k_L": "NO_IMPORT",
+    "overall": "NOT_ESTABLISHED"
+  },
+  "inheritance": {
+    "LQC_k_L": false,
+    "DSI": false,
+    "EPRL": false,
+    "LQG_gamma_lock": false
+  },
+  "reproduces": "audit-status-line",
+  "does_not_recompute": ["Planck_likelihood", "Pantheon_chi2"]
+}
