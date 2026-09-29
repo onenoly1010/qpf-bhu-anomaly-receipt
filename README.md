@@ -27,4 +27,10 @@ It pins the audit:
 Independent reproduction means: run the command, get the same labels,
 or file a challenge that names which frozen assumption you reject.
 
+Fail-closed (later pin, not 19b35f6): a missing or malformed input, an
+opposing verdict token in RECEIPT.md, or any cell mismatch prints
+`REPRODUCTION: FAILED` / `HYPOTHESIS_STATUS: UNKNOWN` (or `STATUS MISMATCH`)
+and exits nonzero. `HYPOTHESIS_STATUS` is read from `receipt.json`
+`cells.overall`. Regression tests: `python3 -m pytest -v tests/`.
+
 Not claimed: stranger has already run this; USED; VALUED; DEPENDENT.
