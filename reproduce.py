@@ -20,7 +20,7 @@ Exit codes:
   1 STATUS MISMATCH (a receipt.json cell is a string but differs from REQUIRED)
   2 INHERITANCE LEAK (an inheritance flag is anything other than false)
   3 RECEIPT.md DRIFT, VERDICT CONFLICT or SUSPICIOUS TEXT
-  4 INPUT MISSING / UNREADABLE / MALFORMED
+  4 INPUT MISSING / UNREADABLE / MALFORMED / TOO LARGE (> MAX_INPUT_BYTES)
   5 unexpected internal error (still reported as FAILED)
 """
 import html
@@ -31,6 +31,10 @@ import unicodedata
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+
+# Input size cap. The genuine receipt.json is 599 bytes and RECEIPT.md 1874
+# bytes; anything above 256 KiB is refused (exit 4) before any parsing.
+MAX_INPUT_BYTES = 256 * 1024
 
 REQUIRED = {
     "C_theta_gt_60": "PRE-EXISTING_DATUM",
@@ -98,7 +102,7 @@ VERDICT_FOLDED_RE = re.compile(
 # ESTABLISHED), so they are rejected outright rather than stripped.
 _BIDI = set("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e"
             "\u2066\u2067\u2068\u2069")
-_TAG_RE = re.compile(r"<[^>]*>")
+_TAG_RE = re.compile(r"<[^<>]*>")  # linear: cannot rescan past another "<"
 _WORD_RE = re.compile(r"[^\W\d_]{2,}")  # runs of 2+ Unicode letters
 
 
@@ -174,6 +178,15 @@ def _no_duplicate_keys(pairs):
     return out
 
 
+def read_capped(p):
+    """Read a UTF-8 text file of at most MAX_INPUT_BYTES (universal newlines)."""
+    with open(p, "rb") as f:
+        data = f.read(MAX_INPUT_BYTES + 1)
+    if len(data) > MAX_INPUT_BYTES:
+        fail(4, f"INPUT TOO LARGE: {p.name} exceeds {MAX_INPUT_BYTES} bytes")
+    return data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def load_inputs(root):
     rj = root / "receipt.json"
     rm = root / "RECEIPT.md"
@@ -181,7 +194,7 @@ def load_inputs(root):
         if not p.is_file():
             fail(4, f"INPUT MISSING: {p.name} not found at {p}")
     try:
-        receipt = json.loads(rj.read_text(encoding="utf-8"),
+        receipt = json.loads(read_capped(rj),
                              object_pairs_hook=_no_duplicate_keys)
     except (OSError, UnicodeDecodeError) as e:
         fail(4, f"INPUT UNREADABLE: receipt.json ({type(e).__name__}: {e})")
@@ -190,7 +203,7 @@ def load_inputs(root):
     except DuplicateKey as e:
         fail(4, f"INPUT MALFORMED: receipt.json has duplicate key '{e}'")
     try:
-        md = rm.read_text(encoding="utf-8")
+        md = read_capped(rm)
     except (OSError, UnicodeDecodeError) as e:
         fail(4, f"INPUT UNREADABLE: RECEIPT.md ({type(e).__name__}: {e})")
     if not isinstance(receipt, dict):
@@ -276,7 +289,21 @@ def run(root):
     return 0
 
 
+def _safe_streams():
+    """Never let an unencodable character turn a status line into a traceback.
+
+    Under a UTF-8 stdout nothing changes; under e.g. PYTHONIOENCODING=ascii or
+    cp1252, characters the encoding lacks are printed as backslash escapes.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def main(root=ROOT):
+    _safe_streams()
     try:
         return run(Path(root))
     except ReproFailure as e:

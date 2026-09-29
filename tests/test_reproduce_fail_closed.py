@@ -242,3 +242,111 @@ def test_7_duplicate_json_key_is_malformed_exit_4(pkg, first, last):
     assert_no_traceback(out, err)
     assert code == 4, out
     assert "duplicate key 'overall'" in out
+
+
+# --- Round 3 (hostile review round 2) --------------------------------------
+import os
+import time
+
+MAX_INPUT_BYTES = 256 * 1024  # must match reproduce.py
+
+
+def run_env(pkg_dir, **env):
+    e = dict(os.environ)
+    e.update(env)
+    t0 = time.monotonic()
+    p = subprocess.run(
+        [sys.executable, str(pkg_dir / "reproduce.py")],
+        cwd=pkg_dir, capture_output=True, timeout=60, env=e,
+    )
+    return p.returncode, p.stdout, p.stderr, time.monotonic() - t0
+
+
+def _dup_nonascii_key(d):
+    rj = d / "receipt.json"
+    src = rj.read_text(encoding="utf-8")
+    rj.write_text(src.replace('"C2"', '"\u0416": 1, "\u0416": 2, "C2"', 1), encoding="utf-8")
+
+
+def _nonascii_inheritance_key(d):
+    rj = d / "receipt.json"
+    data = json.loads(rj.read_text(encoding="utf-8"))
+    data["inheritance"]["\u0416leak"] = True
+    rj.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def _nonascii_mismatch_value(d):
+    rj = d / "receipt.json"
+    data = json.loads(rj.read_text(encoding="utf-8"))
+    data["cells"]["C2"] = "\u0416MISMATCH"
+    rj.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+ENCODING_CASES = {
+    "dup_nonascii_key": (_dup_nonascii_key, 4, b"duplicate key"),
+    "nonascii_inheritance_key": (_nonascii_inheritance_key, 2, b"INHERITANCE LEAK"),
+    "nonascii_mismatch_value": (_nonascii_mismatch_value, 1, b"STATUS MISMATCH"),
+}
+
+
+@pytest.mark.parametrize("encoding", ["ascii", "cp1252"])
+@pytest.mark.parametrize("case", list(ENCODING_CASES), ids=list(ENCODING_CASES))
+def test_8_non_utf8_stdout_never_tracebacks(pkg, encoding, case):
+    mutate, want_code, want_line = ENCODING_CASES[case]
+    mutate(pkg)
+    code, out, err, _ = run_env(pkg, PYTHONIOENCODING=encoding)
+    assert b"Traceback" not in out + err
+    assert err == b""
+    assert code == want_code, out
+    assert want_line in out
+    assert b"REPRODUCTION: FAILED" in out
+    assert b"HYPOTHESIS_STATUS: UNKNOWN" in out
+
+
+@pytest.mark.parametrize("encoding", ["ascii", "cp1252"])
+def test_8b_genuine_output_identical_under_non_utf8_stdout(pkg, encoding):
+    code_u, out_u, _, _ = run_env(pkg, PYTHONIOENCODING="utf-8")
+    code_e, out_e, err_e, _ = run_env(pkg, PYTHONIOENCODING=encoding)
+    assert code_u == code_e == 0
+    assert err_e == b""
+    assert out_e == out_u
+    assert b"HYPOTHESIS_STATUS: NOT ESTABLISHED" in out_e
+
+
+@pytest.mark.parametrize("name,pad", [("RECEIPT.md", "<" * (1024 * 1024)),
+                                      ("RECEIPT.md", " " * (MAX_INPUT_BYTES + 1)),
+                                      ("receipt.json", " " * (MAX_INPUT_BYTES + 1))],
+                         ids=["md_1MiB_lt", "md_just_over_cap", "json_just_over_cap"])
+def test_9_oversize_input_exits_4_fast(pkg, name, pad):
+    p = pkg / name
+    p.write_text(p.read_text(encoding="utf-8") + pad, encoding="utf-8")
+    code, out, err, dt = run_env(pkg)
+    assert b"Traceback" not in out + err
+    assert code == 4, out
+    assert f"INPUT TOO LARGE: {name}".encode() in out
+    assert b"REPRODUCTION: FAILED" in out
+    assert dt < 5, dt
+
+
+def test_9b_pathological_lt_under_cap_completes_fast(pkg):
+    md = pkg / "RECEIPT.md"
+    md.write_text(md.read_text(encoding="utf-8") + "<" * 250_000, encoding="utf-8")
+    assert md.stat().st_size <= MAX_INPUT_BYTES
+    code, out, err, dt = run_env(pkg)
+    assert b"Traceback" not in out + err
+    assert code == 0, out
+    assert dt < 5, dt
+
+
+def test_9c_file_exactly_at_cap_is_accepted(pkg):
+    md = pkg / "RECEIPT.md"
+    size = md.stat().st_size
+    md.write_bytes(md.read_bytes() + b"\n" * (MAX_INPUT_BYTES - size))
+    assert md.stat().st_size == MAX_INPUT_BYTES
+    code, out, err, _ = run_env(pkg)
+    assert code == 0, out
+
+
+def test_9d_cap_constant_matches_script():
+    src = (REPO / "reproduce.py").read_text(encoding="utf-8")
+    assert "MAX_INPUT_BYTES = 256 * 1024" in src
