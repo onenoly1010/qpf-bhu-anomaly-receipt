@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-command reproduction of QPF BHU anomaly receipt (later pin, fail-closed).
+"""One-command reproduction of QPF BHU anomaly receipt (UNPUBLISHED DRAFT, fail-closed; published pin: 19b35f6).
 
 Reproduces locked status labels from receipt.json.
 Does not claim an independent Planck analysis.

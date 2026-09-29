@@ -34,7 +34,7 @@ script's REQUIRED map agree with each other. It is a consistency check, not
 independent verification of the audit. To disagree, file a challenge that
 names which frozen assumption you reject.
 
-## Fail-closed checks (later pin, not 19b35f6)
+## Fail-closed checks (UNPUBLISHED DRAFT of reproduce.py: no commit hash or pin yet; the published pin is still 19b35f6)
 
 `reproduce.py` needs only the Python 3 standard library. It fails closed:
 every failure prints `REPRODUCTION: FAILED` and `HYPOTHESIS_STATUS: UNKNOWN`
@@ -63,9 +63,10 @@ What `RECEIPT.md` is checked for (exit 3):
   and `1ESTABLISHED` count), after HTML entities are decoded, NFKC is
   applied, and format characters (zero-width, soft hyphen, BOM) and
   diacritics are removed. A second pass also removes simple HTML tags
-  (`<...>` with no `<` or `>` inside, so comments or attributes containing
-  `>` are not fully removed, and markdown links are not handled) and the
-  characters `*`, `_`, `~` and backtick. A third pass folds l/1/| to I and 0
+  (`<...>` with no `<` or `>` inside) and the characters `*`, `_`, `~` and
+  backtick. Comments or attributes containing `>` are not fully removed and
+  markdown links are not handled, so a verdict split that way is missed and
+  exits 0 (see "Not checked"). A third pass folds l/1/| to I and 0
   to O. A token found in any pass counts;
 - `NOT` only negates when it is on the same line and separated from
   ESTABLISHED by spaces, tabs, `_` or `-`. A negator directly before
@@ -89,6 +90,21 @@ Not checked:
   not show that these are the published 19b35f6 files;
 - symlinks are followed, and JSON NaN / Infinity values are accepted. Before
   this revision there was no input size cap either.
+
+Known bypasses: each of these still exits 0 with `REPRODUCTION: SAME STATUS`
+and `HYPOTHESIS_STATUS: NOT ESTABLISHED`, even though the rendered
+`RECEIPT.md` text reads as ESTABLISHED (each verified on a copy of this
+revision):
+
+- a verdict split by an HTML comment or by a tag attribute that contains `>`,
+  e.g. `EST<!-- a>b -->ABLISHED` or `EST<span title='>'>ABLISHED</span>`;
+- a verdict split by a markdown link or image, e.g. `EST[ABLISHED](http://x)`
+  or `EST![ABLISHED](x.png)`;
+- control characters inside the word (e.g. U+0000, U+0001, U+0008, U+001B,
+  U+007F), or U+0903 or U+2800 inside the word;
+- semantic negation, e.g. `'NOT ESTABLISHED' is false.`;
+- verdict tokens glued inside a longer word, e.g. `PREESTABLISHED`,
+  `ESTABLISHEDly`, `coESTABLISHEDnstruction`.
 
 Exit 0 is not independent verification, and a run by the author, maintainer
 or another insider is not an outside reproduction.
