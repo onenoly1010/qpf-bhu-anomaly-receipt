@@ -65,7 +65,7 @@ def test_genuine_receipt_passes(pkg):
 def test_1_missing_receipt_json_fails_explicitly(pkg):
     (pkg / "receipt.json").unlink()
     code, out, err = run(pkg)
-    assert code != 0
+    assert code == 4
     assert_no_traceback(out, err)
     assert "INPUT MISSING: receipt.json" in out
     assert "REPRODUCTION: FAILED" in out
@@ -78,7 +78,7 @@ def test_2_opposing_verdict_in_receipt_md_fails(pkg):
     md.write_text(md.read_text(encoding="utf-8") + "Overall verdict: ESTABLISHED\n",
                   encoding="utf-8")
     code, out, err = run(pkg)
-    assert code != 0
+    assert code == 3
     assert_no_traceback(out, err)
     assert "RECEIPT.md VERDICT CONFLICT" in out
     assert "REPRODUCTION: FAILED" in out
@@ -120,3 +120,125 @@ def test_4_hypothesis_status_comes_from_receipt_json_not_a_literal(pkg):
     assert code == 0, out + err
     assert "HYPOTHESIS_STATUS: ESTABLISHED" in out
     assert "NOT ESTABLISHED" not in out
+
+
+# --- Round 2 (hostile review 2026-09-29) -----------------------------------
+
+def append_md(pkg_dir, text):
+    md = pkg_dir / "RECEIPT.md"
+    md.write_text(md.read_text(encoding="utf-8") + text, encoding="utf-8")
+
+
+def assert_md_rejected(pkg_dir):
+    code, out, err = run(pkg_dir)
+    assert_no_traceback(out, err)
+    assert code == 3, out
+    assert "REPRODUCTION: FAILED" in out
+    assert "HYPOTHESIS_STATUS: UNKNOWN" in out
+    assert "SAME STATUS" not in out
+    return out
+
+
+DISGUISED = {
+    # \b treated "_" and digits as word chars; letter-only lookarounds now.
+    "md_italic_underscore": "\n_ESTABLISHED_\n",
+    "md_bold_underscore": "\n__ESTABLISHED__\n",
+    "underscore_joined": "\nVERDICT_ESTABLISHED\n",
+    "digit_joined": "\n1ESTABLISHED\n",
+    # lookalike letters (non-ASCII letter inside a word -> SUSPICIOUS TEXT)
+    "cyrillic_E": "\nVerdict: \u0415STABLISHED\n",
+    "cyrillic_E_A": "\nVerdict: \u0415ST\u0410BLISHED\n",
+    "greek_Epsilon": "\nVerdict: \u0395STABLISHED\n",
+    "cherokee_lookalike_in_word": "\nVerdict: ESTABLISH\u13ACD\n",
+    # NFKC folds these to ASCII
+    "fullwidth": "\nVerdict: \uff25\uff33\uff34\uff21\uff22\uff2c\uff29\uff33\uff28\uff25\uff24\n",
+    # format (Cf) chars are stripped before scanning
+    "zwsp_split": "\nVerdict: ESTAB\u200bLISHED\n",
+    "zwnj_split": "\nVerdict: ESTAB\u200cLISHED\n",
+    "zwj_split": "\nVerdict: ESTAB\u200dLISHED\n",
+    "word_joiner_split": "\nVerdict: ESTAB\u2060LISHED\n",
+    "bom_split": "\nVerdict: ESTAB\ufeffLISHED\n",
+    "soft_hyphen_split": "\nVerdict: ESTAB\u00adLISHED\n",
+    "zwsp_entity_split": "\nVerdict: ESTAB&#x200B;LISHED\n",
+    # diacritics / combining marks are dropped
+    "combining_acute": "\n\u0045\u0301STABLISHED\n",
+    # NOT separator may not span a newline
+    "not_newline": "\nThis is NOT\nESTABLISHED\n",
+    "not_blank_line": "\nThis is NOT\n\nESTABLISHED\n",
+    # rendered-view tricks
+    "intraword_emphasis": "\nVerdict: EST**ABL**ISHED\n",
+    "intraword_html_tag": "\nVerdict: EST<b></b>ABLISHED\n",
+    "html_entity_letter": "\nVerdict: &#69;STABLISHED\n",
+    # ASCII-internal confusables
+    "digit_one_for_I": "\nVerdict: ESTABL1SHED\n",
+    "lower_l_for_I": "\nVerdict: ESTABLlSHED\n",
+    # bidi override renders DEHSILBATSE as ESTABLISHED
+    "bidi_override": "\nVerdict: \u202eDEHSILBATSE\u202c\n",
+    # negated negation
+    "double_negation": "\nBHU is NOT NOT ESTABLISHED\n",
+    "no_longer_not": "\nBHU is no longer NOT ESTABLISHED\n",
+}
+
+
+@pytest.mark.parametrize("text", list(DISGUISED.values()), ids=list(DISGUISED))
+def test_5_disguised_opposing_verdict_fails_closed(pkg, text):
+    append_md(pkg, text)
+    out = assert_md_rejected(pkg)
+    assert ("VERDICT CONFLICT" in out) or ("SUSPICIOUS TEXT" in out)
+
+
+EQUIVALENT = {
+    "canonical_underscore": "\nsee NOT_ESTABLISHED\n",
+    "hyphen": "\nsee NOT-ESTABLISHED\n",
+    "nbsp": "\nsee NOT\u00a0ESTABLISHED\n",
+    "tab": "\nsee NOT\tESTABLISHED\n",
+    "bold_whole_phrase": "\n**NOT ESTABLISHED**\n",
+}
+
+
+@pytest.mark.parametrize("text", list(EQUIVALENT.values()), ids=list(EQUIVALENT))
+def test_5b_same_verdict_restated_still_passes(pkg, text):
+    append_md(pkg, text)
+    code, out, err = run(pkg)
+    assert code == 0, out + err
+    assert "HYPOTHESIS_STATUS: NOT ESTABLISHED" in out
+
+
+BAD_OVERALL = {
+    "missing": "__DELETE__",
+    "null": None,
+    "int": 0,
+    "list": ["NOT_ESTABLISHED"],
+    "dict": {"v": "NOT_ESTABLISHED"},
+}
+
+
+@pytest.mark.parametrize("value", list(BAD_OVERALL.values()), ids=list(BAD_OVERALL))
+def test_6_missing_or_non_string_overall_is_malformed_exit_4(pkg, value):
+    rj = pkg / "receipt.json"
+    data = json.loads(rj.read_text(encoding="utf-8"))
+    if value == "__DELETE__":
+        del data["cells"]["overall"]
+    else:
+        data["cells"]["overall"] = value
+    rj.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    code, out, err = run(pkg)
+    assert_no_traceback(out, err)
+    assert code == 4, out
+    assert "INPUT MALFORMED: receipt.json cells.overall is missing or not a string" in out
+    assert "HYPOTHESIS_STATUS: UNKNOWN" in out
+
+
+@pytest.mark.parametrize("first,last", [("ESTABLISHED", "NOT_ESTABLISHED"),
+                                        ("NOT_ESTABLISHED", "ESTABLISHED")])
+def test_7_duplicate_json_key_is_malformed_exit_4(pkg, first, last):
+    rj = pkg / "receipt.json"
+    src = rj.read_text(encoding="utf-8")
+    assert src.count('"overall": "NOT_ESTABLISHED"') == 1
+    rj.write_text(src.replace('"overall": "NOT_ESTABLISHED"',
+                              f'"overall": "{first}", "overall": "{last}"'),
+                  encoding="utf-8")
+    code, out, err = run(pkg)
+    assert_no_traceback(out, err)
+    assert code == 4, out
+    assert "duplicate key 'overall'" in out
