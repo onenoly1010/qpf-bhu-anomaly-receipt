@@ -10,11 +10,15 @@ Hash pin (checked FIRST, before either file is decoded, parsed or checked):
   RECEIPT.md. The raw bytes of both files must match or the run fails closed
   (exit 6). The manifest does not list itself (a file cannot contain its own
   hash) and does not cover reproduce.py, so a match only shows that the files
-  agree with the manifest next to them. No anchor is published yet (pending
-  registry issue #894): compare the manifest's sha256, printed on success, and
-  `git rev-parse HEAD` with values you computed yourself or obtain later.
-- This script does not scan for secrets. Secret scanning is done at commit
-  time by gitleaks (scripts/pre-commit, optional CI); see README.
+  agree with the manifest next to them. No anchor is published yet. It is
+  tracked as #894; the repository and URL of #894 are to be announced. Until
+  an anchor is published there, comparing the manifest's sha256 (printed on
+  success) and `git rev-parse HEAD` with values you computed yourself
+  authenticates NOTHING: it only records what you ran and catches a script
+  that misreports its own hashes.
+- This script does not scan for secrets. Secret scanning is done only at
+  commit time, by gitleaks via scripts/pre-commit in clones that installed
+  that hook (staged diff only), plus a manual-only CI workflow; see README.
 - The script reads no environment variables and no configuration files. The
   Python interpreter still picks the stdout encoding from the environment
   (PYTHONIOENCODING, locale); the genuine output is ASCII, so it is
@@ -320,8 +324,8 @@ def run(root):
     for name in PINNED_FILES:
         print(f"HASH_PIN: OK {name} sha256 {pins[name]}")
     print(f"HASH_PIN: {MANIFEST_NAME} sha256 {manifest_sha} "
-          "(not self-verifying; no published anchor yet, pending #894: "
-          "compare with a value you computed or obtain later)")
+          "(not self-verifying; no published anchor yet, #894 location to be "
+          "announced; matching a value you computed yourself authenticates nothing)")
     print("---")
     failed = []
     for k, v in REQUIRED.items():

@@ -5,7 +5,7 @@ Receipt data: v1, pinned 2026-09-24 (`receipt.json` `version` / `pinned`; the
 first line labels the script as this unpublished draft). The published
 object is commit 19b35f6. This branch is a later, unpublished revision: it
 changes `reproduce.py` and adds `PINNED_HASHES.sha256`, tests, a pre-commit
-hook and an optional CI workflow. `receipt.json` and `RECEIPT.md` are
+hook and a manual-only CI workflow. `receipt.json` and `RECEIPT.md` are
 byte-identical to 19b35f6. None of this revision has a version, pin or
 published anchor yet.
 
@@ -41,8 +41,9 @@ names which frozen assumption you reject.
 ## Fail-closed checks (UNPUBLISHED DRAFT of reproduce.py: no commit hash or pin yet; the published pin is still 19b35f6)
 
 `reproduce.py` needs only the Python 3 standard library. It fails closed:
-every failure prints `REPRODUCTION: FAILED` and `HYPOTHESIS_STATUS: UNKNOWN`
-and exits nonzero. Output that the terminal encoding cannot represent is
+every failure it detects, and any unexpected Python exception inside the run,
+prints `REPRODUCTION: FAILED` and `HYPOTHESIS_STATUS: UNKNOWN` and exits
+nonzero. Output that the terminal encoding cannot represent is
 printed as backslash escapes instead of raising (tested with UTF-8, ASCII and
 cp1252 stdout). On success `HYPOTHESIS_STATUS` is
 read from `receipt.json` `cells.overall`, not from a literal in the script.
@@ -55,6 +56,9 @@ the format written by `sha256sum`, so it can be checked without Python:
 ```
 sha256sum -c --strict PINNED_HASHES.sha256
 ```
+
+`sha256sum -c` checks whatever files the manifest lists. It does not enforce
+the script's rule that the manifest lists exactly these two files.
 
 `reproduce.py` first reads the manifest, which must contain exactly one
 `<64 lowercase hex>  <name>` line for each of the two files and nothing else.
@@ -90,10 +94,19 @@ git status --porcelain
 
 `git status --porcelain` should print nothing, so that the files you ran are
 the ones in that commit. The manifest sha256 is also printed on the last
-`HASH_PIN:` line of a successful run. The real values will be published in
-registry issue #894. Status: PENDING. Nothing will be published there until
-OINIO authorizes it. Until then, compare against values you computed yourself
-or obtain later from that issue.
+`HASH_PIN:` line of a successful run.
+
+These values authenticate NOTHING on their own. Comparing them with values you
+computed yourself only records what you ran and catches a script that
+misreports its own hashes. It does not show that the files, the manifest or
+the commit are the ones the author intends to publish. That needs an anchor
+published somewhere you do not get from this repository.
+
+The anchor is tracked as #894. The repository and URL of #894 are to be
+announced; this revision does not name them because they have not been
+confirmed. Status: PENDING. Nothing will be published until OINIO authorizes
+it. Until an anchor is published there, nothing in this package is
+authenticated.
 
 ### Secret scanning (not done by `reproduce.py`)
 
@@ -101,8 +114,11 @@ or obtain later from that issue.
 environment variables and no configuration files, so a local run and a
 stranger's untouched run of the same files check the same things. Python
 still picks the stdout encoding; the genuine output is ASCII, and the tests
-show it is byte-identical under the environment settings they try. Secret
-scanning happens when a commit is made, with
+show it is byte-identical under the environment settings they try.
+
+Secret scanning happens only in clones where `scripts/pre-commit` has been
+installed as the pre-commit hook and is not bypassed, and only on the staged
+diff of each new commit. It uses
 [gitleaks](https://github.com/gitleaks/gitleaks) (tested with 8.30.1) and its
 default ruleset:
 
@@ -116,14 +132,44 @@ default ruleset:
   cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
   ```
 
-- `.github/workflows/gitleaks.yml` (optional CI) scans the full history with
-  the same default rules. It runs only on GitHub, after a push or pull
-  request.
+- `.github/workflows/gitleaks.yml` scans the full history with the same
+  default rules. It is manual-only: its only trigger is `workflow_dispatch`,
+  so it never runs on a push, tag or pull request. Someone with write access
+  must start it on GitHub. Whenever it runs, the commits it scans are already
+  on GitHub, so it can only detect a secret after publication and blocks
+  nothing. `actions/checkout` is pinned to a commit SHA, and the gitleaks
+  tarball is checked against a pinned sha256.
 
-Limits: git does not install hooks for you, so each clone must copy the hook
-in, and `git commit --no-verify` skips it. The default rules can miss
-secrets. For example, a bare 64-hex private key with no identifying keyword
-is not flagged.
+Limits of the hook. Each was checked in a throwaway clone with a fake,
+randomly generated value unless marked otherwise:
+
+- git does not install hooks. A fresh clone has no pre-commit hook until
+  someone copies it in, so the hook does nothing for strangers.
+- The hook does nothing for history made without it. That includes the
+  published 19b35f6, which predates the hook (not re-tested; `scripts/pre-commit`
+  does not exist at 19b35f6).
+- `git commit --no-verify` skips it.
+- A `core.hooksPath` setting points git at another hooks directory, and the
+  hook is never run (tested with `git -c core.hooksPath=...`; repository
+  config and `GIT_CONFIG_*` set the same option).
+- Any program called `gitleaks` earlier on `PATH` is run instead. The hook has
+  no version or checksum check, so a fake that exits 0 lets every commit
+  through.
+- Commit messages are not scanned. A secret in the message is committed.
+- Binary files (for example with NUL bytes) are skipped, and compressed files
+  (for example gzip) are not decompressed. A secret inside them is committed.
+- Only the staged diff is scanned: not the tree, not history, and nothing
+  already committed. A clean commit on top of a commit made with
+  `--no-verify` passes, although a full-history scan finds the secret. This
+  follows from staged-only scanning (not each tested separately): amends,
+  merges (there is no pre-merge-commit hook), cherry-picks and renames of
+  already-committed secrets are not caught either.
+- The default rules miss some secrets. A random 64-hex value in a
+  sha256-named field (for example `"source_sha256": "<64 hex>"`) is not
+  flagged. Neither is a Kraken-style 88-character base64 secret without the
+  word "kraken" nearby (bare, after `note:`, or in a `source_sha256` field).
+  The same value after `kraken_secret =` is caught. So is a value after a
+  label containing "api".
 
 | Exit | Meaning |
 |---|---|
@@ -223,7 +269,8 @@ python3 -m pytest -v tests/
 They run `reproduce.py` on temporary copies; the real files are not modified.
 Tests that edit `receipt.json` or `RECEIPT.md` to exercise the parser re-pin
 the temporary copy's manifest first. The hash-pin tests do not. The known
-bypasses above are recorded as strict `xfail` tests (reported as `xfailed`),
-so a parser fix that closes one will show up as an unexpected pass.
+bypasses above are recorded as strict `xfail` tests (reported as `xfailed`).
+A parser fix that closes one makes that test pass unexpectedly, which fails
+the test run (strict XPASS) until the xfail mark is removed.
 
 Not claimed: stranger has already run this; USED; VALUED; DEPENDENT.
