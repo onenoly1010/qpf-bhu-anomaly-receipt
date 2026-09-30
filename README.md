@@ -102,11 +102,9 @@ misreports its own hashes. It does not show that the files, the manifest or
 the commit are the ones the author intends to publish. That needs an anchor
 published somewhere you do not get from this repository.
 
-The anchor is tracked as #894. The repository and URL of #894 are to be
-announced; this revision does not name them because they have not been
-confirmed. Status: PENDING. Nothing will be published until OINIO authorizes
-it. Until an anchor is published there, nothing in this package is
-authenticated.
+Anchor location: to be announced. Status: PENDING. Nothing will be published
+until OINIO authorizes it. Until an anchor is published, nothing in this
+package is authenticated.
 
 ### Secret scanning (not done by `reproduce.py`)
 
