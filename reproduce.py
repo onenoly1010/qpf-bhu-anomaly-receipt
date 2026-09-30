@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
 """One-command reproduction of QPF BHU anomaly receipt (UNPUBLISHED DRAFT, fail-closed; published pin: 19b35f6).
 
-Reproduces locked status labels from receipt.json.
-Does not claim an independent Planck analysis.
+Checks that receipt.json, RECEIPT.md and this script's REQUIRED map agree on
+the locked status labels, and prints the status read from receipt.json. This
+is a consistency check, not an independent Planck analysis.
 
-Hash pin (checked FIRST, before any parsing, scanning or verdict):
+Hash pin (checked FIRST, before either file is decoded, parsed or checked):
 - PINNED_HASHES.sha256 (sha256sum format) holds the sha256 of receipt.json and
   RECEIPT.md. The raw bytes of both files must match or the run fails closed
   (exit 6). The manifest does not list itself (a file cannot contain its own
-  hash) and does not cover reproduce.py; compare the manifest's own sha256,
-  printed on success, and the commit id with the published values.
-- Secret scan (after the hash check): private-key blocks and provider tokens
-  in receipt.json or RECEIPT.md block the run (exit 7); the value is never
-  printed. Hash-like hex is never blocked: an exact 64-hex value at key
-  "sha256"/"*_sha256" or 40-hex at "commit"/"*_commit"/"git_sha" in
-  receipt.json passes; any other hex run of 32+ digits only warns.
+  hash) and does not cover reproduce.py, so a match only shows that the files
+  agree with the manifest next to them. No anchor is published yet (pending
+  registry issue #894): compare the manifest's sha256, printed on success, and
+  `git rev-parse HEAD` with values you computed yourself or obtain later.
+- This script does not scan for secrets. Secret scanning is done at commit
+  time by gitleaks (scripts/pre-commit, optional CI); see README.
+- The script reads no environment variables and no configuration files. The
+  Python interpreter still picks the stdout encoding from the environment
+  (PYTHONIOENCODING, locale); the genuine output is ASCII, so it is
+  byte-identical under any ASCII-compatible encoding, and characters stdout
+  cannot encode are printed as backslash escapes. Interpreter-level variables
+  such as PYTHONPATH are outside the script's control (`python3 -I` ignores
+  them).
 
 Fail-closed rules (STRANGER_RUN_003 repro gaps + hostile review 2026-09-29):
 - a missing, unreadable or malformed receipt.json / RECEIPT.md prints an
@@ -24,6 +31,7 @@ Fail-closed rules (STRANGER_RUN_003 repro gaps + hostile review 2026-09-29):
   scanned for the verdict tokens NOT ESTABLISHED / ESTABLISHED / RULED OUT /
   FAILED / UNKNOWN after normalisation (see _views); any other token found,
   or any disguised word (non-ASCII letter inside a word, bidi control) fails.
+  The scan is incomplete: README lists known inputs it misses.
 - the printed HYPOTHESIS_STATUS is read from receipt.json cells.overall,
   never from a string literal in this script.
 
@@ -36,7 +44,6 @@ Exit codes:
     including a missing or malformed PINNED_HASHES.sha256
   5 unexpected internal error (still reported as FAILED)
   6 HASH MISMATCH (receipt.json or RECEIPT.md differs from PINNED_HASHES.sha256)
-  7 SECRET-LIKE CONTENT (private key / provider token) in receipt.json or RECEIPT.md
 """
 import hashlib
 import html
@@ -55,42 +62,14 @@ MAX_INPUT_BYTES = 256 * 1024
 # Hash pin. The manifest is a separate, unhashed file (self-reference trap:
 # RECEIPT.md cannot contain its own hash). Format: one "<sha256>  <name>" line
 # per pinned file, exactly as written by `sha256sum receipt.json RECEIPT.md`,
-# so it can also be checked without Python: `sha256sum -c PINNED_HASHES.sha256`.
+# so it can also be checked without Python:
+# `sha256sum -c --strict PINNED_HASHES.sha256`.
 MANIFEST_NAME = "PINNED_HASHES.sha256"
 PINNED_FILES = ("receipt.json", "RECEIPT.md")
 _MANIFEST_LINE_RE = re.compile(r"([0-9a-f]{64})  (\S+)")
 
 DRAFT_LABEL = ("QPF BHU anomaly receipt: UNPUBLISHED DRAFT of reproduce.py "
                "(no commit hash or pin yet; published pin is still 19b35f6)")
-
-# High-confidence secret patterns: any match in receipt.json or RECEIPT.md
-# BLOCKS (exit 7). Names only are printed, never the matched value.
-SECRET_PATTERNS = {
-    "private_key_block": r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----",
-    "aws_access_key_id": r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b",
-    "github_token": r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}\b|\bgithub_pat_[A-Za-z0-9_]{22,}\b",
-    "slack_token": r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b",
-    "stripe_live_key": r"\b(?:sk|rk)_live_[A-Za-z0-9]{16,}\b",
-    "openai_like_key": r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b",
-    "xai_like_key": r"\bxai-[A-Za-z0-9]{20,}\b",
-    "google_api_key": r"\bAIza[0-9A-Za-z_-]{35}\b",
-    "jwt": r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b",
-    "discord_webhook": r"discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]+",
-    "telegram_bot_token": r"\b\d{8,10}:[A-Za-z0-9_-]{35}\b",
-    "long_base64_secret": r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{56,}={0,2}(?![A-Za-z0-9+/=])",
-    "secret_assignment": r"(?i)\b(?:api[_-]?key|secret|passw(?:or)?d|token|private[_-]?key|mnemonic|seed[_ ]phrase)\b\s*[:=]\s*['\"]?[A-Za-z0-9+/_\-]{12,}",
-}
-_SECRET_RES = {k: re.compile(v) for k, v in SECRET_PATTERNS.items()}
-
-# Hash-like values: never blocked. Pass silently at an allowlisted receipt.json
-# field path, otherwise WARN. 0x-prefixed forms are included.
-_HEX64_RE = re.compile(r"(?<![0-9A-Fa-f])(?:0x)?[0-9A-Fa-f]{64}(?![0-9A-Fa-f])")
-_HEX40_RE = re.compile(r"(?<![0-9A-Fa-f])(?:0x)?[0-9A-Fa-f]{40}(?![0-9A-Fa-f])")
-# Any hex run of 32+ digits (so every run exempted from long_base64_secret
-# is still surfaced) is reported by its length, e.g. "hex64", "hex40".
-_HEX_RUN_RE = re.compile(r"(?<![0-9A-Fa-f])(?:0x)?([0-9A-Fa-f]{32,})(?![0-9A-Fa-f])")
-_HASH_FIELD_64 = re.compile(r"(?:^|_)sha256$")
-_HASH_FIELD_40 = re.compile(r"(?:^|_)(?:commit|git_sha)$")
 
 REQUIRED = {
     "C_theta_gt_60": "PRE-EXISTING_DATUM",
@@ -275,67 +254,6 @@ def load_manifest(root):
     return pins, hashlib.sha256(raw).hexdigest()
 
 
-_PURE_HEX_RE = re.compile(r"(?:0x)?[0-9A-Fa-f]+")
-
-
-def _secret_hit(pat, rx, line):
-    for m in rx.finditer(line):
-        # Scoped exemption: hex digits are a subset of the base64 alphabet, so
-        # a bare 64-hex sha256 (or longer hex run) would otherwise trip
-        # long_base64_secret. Pure-hex runs are left to hash_like_warnings()
-        # (allowlisted field -> pass, anywhere else -> WARN); every other
-        # pattern, and any base64 run with a non-hex character, still blocks.
-        if pat == "long_base64_secret" and _PURE_HEX_RE.fullmatch(m.group(0)):
-            continue
-        return True
-    return False
-
-
-def secret_scan(texts):
-    """BLOCK on high-confidence secrets; report pattern + location, never value."""
-    for name, text in texts.items():
-        for lineno, line in enumerate(text.split("\n"), 1):
-            for pat, rx in _SECRET_RES.items():
-                if _secret_hit(pat, rx, line):
-                    fail(7, f"SECRET-LIKE CONTENT: {pat} in {name} line {lineno} "
-                            f"(value not printed); remove it and rotate the credential")
-
-
-def hash_like_warnings(receipt, md):
-    """Classify 64/40-hex values: allowlisted receipt.json field -> pass, else warn."""
-    warns = []
-
-    def walk(node, path):
-        if isinstance(node, dict):
-            for k, v in node.items():
-                key = str(k)
-                m = _HEX_RUN_RE.search(key)
-                if m:
-                    warns.append(f"hex{len(m.group(1))} in key name at receipt.json {path}")
-                walk(v, f"{path}.{key}")
-        elif isinstance(node, list):
-            for i, v in enumerate(node):
-                walk(v, f"{path}[{i}]")
-        elif isinstance(node, str):
-            leaf = path.rsplit(".", 1)[-1]
-            v = node[2:] if node[:2] in ("0x", "0X") else node
-            if len(v) == 64 and _HEX64_RE.fullmatch(v) and _HASH_FIELD_64.search(leaf):
-                return  # allowlisted: exact sha256 value at a sha256 field
-            if len(v) == 40 and _HEX40_RE.fullmatch(v) and _HASH_FIELD_40.search(leaf):
-                return  # allowlisted: exact git SHA value at a commit field
-            m = _HEX_RUN_RE.search(node)
-            if m:
-                warns.append(f"hex{len(m.group(1))} at receipt.json {path} "
-                             "(not an exact value at an allowlisted hash field)")
-
-    walk(receipt, "$")
-    for lineno, line in enumerate(md.split("\n"), 1):
-        m = _HEX_RUN_RE.search(line)
-        if m:
-            warns.append(f"hex{len(m.group(1))} in RECEIPT.md line {lineno}")
-    return warns
-
-
 def load_inputs(root):
     rj = root / "receipt.json"
     rm = root / "RECEIPT.md"
@@ -351,11 +269,9 @@ def load_inputs(root):
         if got != pins[name]:
             fail(6, f"HASH MISMATCH: {name} sha256 {got} != pinned {pins[name]} "
                     f"({MANIFEST_NAME}); file changed since it was pinned")
-    # 2. decode + secret scan -- still before JSON parsing or verdict logic
+    # 2. decode and parse, only after both hashes matched
     rj_text = decode_text(rj, raw["receipt.json"])
     md = decode_text(rm, raw["RECEIPT.md"])
-    secret_scan({"receipt.json": rj_text, "RECEIPT.md": md})
-    # 3. parse
     try:
         receipt = json.loads(rj_text, object_pairs_hook=_no_duplicate_keys)
     except json.JSONDecodeError as e:
@@ -404,9 +320,8 @@ def run(root):
     for name in PINNED_FILES:
         print(f"HASH_PIN: OK {name} sha256 {pins[name]}")
     print(f"HASH_PIN: {MANIFEST_NAME} sha256 {manifest_sha} "
-          "(not self-verifying; compare with the published value)")
-    for w in hash_like_warnings(receipt, md):
-        print(f"WARN: hash-like value, {w}; confirm it is a hash, not a key")
+          "(not self-verifying; no published anchor yet, pending #894: "
+          "compare with a value you computed or obtain later)")
     print("---")
     failed = []
     for k, v in REQUIRED.items():

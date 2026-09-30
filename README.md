@@ -3,8 +3,11 @@
 Receipt data: v1, pinned 2026-09-24 (`receipt.json` `version` / `pinned`; the
 `RECEIPT_DATA:` line of the script's output repeats these two fields, and its
 first line labels the script as this unpublished draft). The published
-object is commit 19b35f6. This branch's `reproduce.py` is a later, unpublished
-revision of the script only; it has no version or pin of its own.
+object is commit 19b35f6. This branch is a later, unpublished revision: it
+changes `reproduce.py` and adds `PINNED_HASHES.sha256`, tests, a pre-commit
+hook and an optional CI workflow. `receipt.json` and `RECEIPT.md` are
+byte-identical to 19b35f6. None of this revision has a version, pin or
+published anchor yet.
 
 Narrow public package. One negative result.
 
@@ -50,15 +53,18 @@ read from `receipt.json` `cells.overall`, not from a literal in the script.
 the format written by `sha256sum`, so it can be checked without Python:
 
 ```
-sha256sum -c PINNED_HASHES.sha256
+sha256sum -c --strict PINNED_HASHES.sha256
 ```
 
-Before anything is parsed, scanned or compared, `reproduce.py` reads the raw
-bytes of both files and compares their sha256 with the manifest. A missing or
-malformed manifest, or a missing pinned file, exits 4. A hash that differs
-exits 6 (`HASH MISMATCH`). Either way nothing else is checked and no
-`SAME STATUS` line is printed. On success the script prints both hashes and
-the sha256 of the manifest itself.
+`reproduce.py` first reads the manifest, which must contain exactly one
+`<64 lowercase hex>  <name>` line for each of the two files and nothing else.
+Then it reads the raw bytes of both files (a file over 256 KiB is refused
+before hashing) and compares their sha256 with the manifest. Only after both
+match are the files decoded, parsed and checked. A missing or malformed
+manifest, or a missing pinned file, exits 4. A hash that differs exits 6
+(`HASH MISMATCH`). Either way nothing else is checked and no `SAME STATUS`
+line is printed. On success the script prints both hashes and the sha256 of
+the manifest itself.
 
 Why a separate manifest file and not constants in `reproduce.py` or a line in
 `RECEIPT.md`: `RECEIPT.md` cannot contain its own hash (changing the line
@@ -68,34 +74,56 @@ changes one small file instead of the script. The limits are the same with
 either choice: the manifest does not cover itself or `reproduce.py`, so anyone
 who edits the files can also edit the manifest. The hash pin shows that the
 files match the manifest in this directory. It does not show that the
-manifest is the published one. Compare the manifest's sha256 (printed on
-success) and the git commit with the published values.
+manifest is the published one.
 
-### Secret scan (after the hash check)
+### Anchor: none published yet
 
-Both pinned files are scanned before parsing. High-confidence secret patterns
-exit 7 (`SECRET-LIKE CONTENT`) even when the hashes match. The pattern name and
-line are printed, the value is not. These patterns are: PEM and OpenSSH
-private-key blocks; AWS `AKIA`/`ASIA` key ids; GitHub
-`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`/`github_pat_` tokens; Slack `xox*`; Stripe
-`sk_live_`/`rk_live_`; `sk-` and `xai-` style API keys; Google `AIza` keys;
-JWTs; Discord webhooks; Telegram bot tokens; `secret=`/`token:` style
-assignments; and base64 runs of 56 or more characters.
+No anchor for this revision has been published. There is no official
+manifest sha256 or commit id to compare against yet. Compute them yourself:
 
-Hash-like values are never blocked. Hex digits are a subset of the base64
-alphabet, so a bare 64-hex sha256 would otherwise trip the long-base64 rule. A
-run made only of hex digits (optionally `0x`) is therefore exempt from that
-one rule and is handled like this:
+```
+sha256sum -c --strict PINNED_HASHES.sha256
+sha256sum PINNED_HASHES.sha256
+git rev-parse HEAD
+git status --porcelain
+```
 
-- It passes silently when it is the exact whole value at an allowlisted
-  `receipt.json` field: 64 hex at a key named `sha256` or `*_sha256`, or 40 hex
-  at `commit`, `*_commit` or `git_sha`.
-- Anywhere else (another field, a key name, any `RECEIPT.md` line) it prints
-  `WARN: hash-like value, ...` and does not change the exit code.
+`git status --porcelain` should print nothing, so that the files you ran are
+the ones in that commit. The manifest sha256 is also printed on the last
+`HASH_PIN:` line of a successful run. The real values will be published in
+registry issue #894. Status: PENDING. Nothing will be published there until
+OINIO authorizes it. Until then, compare against values you computed yourself
+or obtain later from that issue.
 
-A secret placed at an allowlisted field still exits 7. A private key written
-as bare hex (for example a 64-hex wallet key) is indistinguishable from a
-sha256, so it only warns.
+### Secret scanning (not done by `reproduce.py`)
+
+`reproduce.py` does not scan for secrets and has no warning path. It reads no
+environment variables and no configuration files, so a local run and a
+stranger's untouched run of the same files check the same things. Python
+still picks the stdout encoding; the genuine output is ASCII, and the tests
+show it is byte-identical under the environment settings they try. Secret
+scanning happens when a commit is made, with
+[gitleaks](https://github.com/gitleaks/gitleaks) (tested with 8.30.1) and its
+default ruleset:
+
+- `scripts/pre-commit` runs `gitleaks git --pre-commit --staged` on the staged
+  changes. It uses no custom config, allowlist or baseline, and it ignores
+  inline `gitleaks:allow` comments. It refuses the commit if gitleaks is
+  missing or if a `.gitleaks.toml` or `.gitleaksignore` file exists. Install
+  it in a clone from the repository root:
+
+  ```
+  cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+  ```
+
+- `.github/workflows/gitleaks.yml` (optional CI) scans the full history with
+  the same default rules. It runs only on GitHub, after a push or pull
+  request.
+
+Limits: git does not install hooks for you, so each clone must copy the hook
+in, and `git commit --no-verify` skips it. The default rules can miss
+secrets. For example, a bare 64-hex private key with no identifying keyword
+is not flagged.
 
 | Exit | Meaning |
 |---|---|
@@ -106,9 +134,8 @@ sha256, so it only warns.
 | 4 | Input missing, unreadable, too large or malformed: no file (including `PINNED_HASHES.sha256`), a malformed manifest, a file over 256 KiB (262144 bytes), bad UTF-8 or JSON, duplicate JSON key, missing top-level key, or a REQUIRED cell (including `cells.overall`) that is missing or not a string |
 | 5 | Unexpected internal error (still printed as FAILED) |
 | 6 | `HASH MISMATCH`: `receipt.json` or `RECEIPT.md` differs from `PINNED_HASHES.sha256` |
-| 7 | `SECRET-LIKE CONTENT`: private key or provider token in `receipt.json` or `RECEIPT.md` |
 
-What `RECEIPT.md` is checked for (exit 3):
+What `RECEIPT.md` is checked for (exit 3; only after the hash pin passes):
 
 - the non-verdict labels (PRE-EXISTING DATUM, ACCOMMODATION, UNDERDETERMINED,
   LOCKED, OTHER_ROW, NO_IMPORT) are present;
@@ -122,8 +149,8 @@ What `RECEIPT.md` is checked for (exit 3):
   (`<...>` with no `<` or `>` inside) and the characters `*`, `_`, `~` and
   backtick. Comments or attributes containing `>` are not fully removed and
   markdown links are not handled, so a verdict split that way is missed and
-  exits 0 (see "Not checked"). A third pass folds l/1/| to I and 0
-  to O. A token found in any pass counts;
+  exits 0 once the manifest matches (see "Known bypasses"). A third pass
+  folds l, 1, | and ! to I and 0 to O. A token found in any pass counts;
 - `NOT` only negates when it is on the same line and separated from
   ESTABLISHED by spaces, tabs, `_` or `-`. A negator directly before
   NOT ESTABLISHED (for example `NOT NOT ESTABLISHED`) also fails;
@@ -148,8 +175,11 @@ Not checked:
   that the files match the manifest next to them, so exit 0 does not show that
   these are the published 19b35f6 files. Note that the published pin 19b35f6
   has no manifest at all;
-- symlinks are followed, and JSON NaN / Infinity values are accepted. Before
-  this revision there was no input size cap either.
+- symlinks are followed, and JSON NaN / Infinity values are accepted. The
+  published 19b35f6 script has no input size cap either;
+- secrets: `reproduce.py` does not scan for them (see "Secret scanning");
+- the Python interpreter itself: variables such as `PYTHONPATH` can change
+  which modules Python imports. `python3 -I reproduce.py` ignores them.
 
 Known bypasses: the verdict parser still misses every input below. Each was
 tested on a copy of this revision in two ways. Appended to a pinned
@@ -174,11 +204,12 @@ STILL OPEN; the hash pin does not fix the parser:
 Exit 0 is not independent verification, and a run by the author, maintainer
 or another insider is not an outside reproduction.
 
-Known over-rejection: the scan fails closed (exit 3) on ordinary text such as
-"well-established", "unknown", "not yet established", "failed to converge",
-Greek or other non-ASCII letters inside words (ΛCDM, Ωm, Δχ², μK), and names
-with non-decomposable letters (Møller, Weiß, Łukasz). Cosmology prose added to
-`RECEIPT.md` will therefore often exit 3.
+Known over-rejection: the `RECEIPT.md` verdict scan fails closed (exit 3) on
+ordinary text such as "well-established", "unknown", "not yet established",
+"failed to converge", Greek or other non-ASCII letters inside words (ΛCDM, Ωm,
+Δχ², μK), and names with non-decomposable letters (Møller, Weiß, Łukasz).
+Cosmology prose added to `RECEIPT.md` (with the manifest re-pinned) will
+therefore often exit 3.
 
 ### Regression tests
 

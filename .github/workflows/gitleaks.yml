@@ -1,0 +1,31 @@
+# Secret scan of the full git history with gitleaks' DEFAULT ruleset.
+# This file does nothing locally: it only runs on GitHub after it is pushed.
+name: gitleaks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  gitleaks:
+    runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks (official release, sha256 checked)
+        run: |
+          f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfLO "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}"
+          echo "${GITLEAKS_SHA256}  ${f}" | sha256sum -c --strict -
+          tar xzf "$f" gitleaks
+      - name: Refuse custom gitleaks config or allowlist
+        run: |
+          for f in .gitleaks.toml .gitleaksignore; do
+            if [ -e "$f" ]; then echo "$f present: default ruleset only"; exit 1; fi
+          done
+      - name: Scan full history (default rules, no inline allows)
+        run: ./gitleaks git --redact --no-banner --verbose --ignore-gitleaks-allow .

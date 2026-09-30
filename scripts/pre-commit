@@ -1,0 +1,34 @@
+#!/bin/sh
+# Pre-commit secret scan for this repository.
+#
+# Runs gitleaks with its DEFAULT ruleset on the staged changes only
+# (`gitleaks git --pre-commit --staged`, gitleaks' standard pre-commit mode).
+# No custom config, no allowlist, no baseline, and inline `gitleaks:allow`
+# comments are ignored. If gitleaks is missing, or a .gitleaks.toml /
+# .gitleaksignore appears in the repository, the commit is refused.
+#
+# Install into a clone (from the repository root):
+#   cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+# Tested with gitleaks 8.30.1.
+set -eu
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+    echo "pre-commit: gitleaks not found on PATH; commit refused (see README, 'Secret scanning')." >&2
+    exit 1
+fi
+
+top=$(git rev-parse --show-toplevel)
+for f in .gitleaks.toml .gitleaksignore; do
+    if [ -e "$top/$f" ]; then
+        echo "pre-commit: $f present; this repository uses the gitleaks default ruleset with no allowlist; commit refused." >&2
+        exit 1
+    fi
+done
+
+# An inherited GITLEAKS_CONFIG / GITLEAKS_CONFIG_TOML would replace the
+# default ruleset, so drop them for this scan.
+unset GITLEAKS_CONFIG GITLEAKS_CONFIG_TOML
+
+cd "$top"
+exec gitleaks git --pre-commit --staged --redact --no-banner --verbose \
+    --ignore-gitleaks-allow .

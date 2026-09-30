@@ -394,9 +394,7 @@ def test_9d_cap_constant_matches_script():
     assert "MAX_INPUT_BYTES = 256 * 1024" in src
 
 
-# --- Round 5: hash pin, scoped secret scan, draft header --------------------
-# Fake secrets are assembled at runtime so this file itself carries no
-# scanner- or push-protection-tripping literal.
+# --- Round 5: hash pin, draft header ----------------------------------------
 
 DRAFT_HEADER = ("QPF BHU anomaly receipt: UNPUBLISHED DRAFT of reproduce.py "
                 "(no commit hash or pin yet; published pin is still 19b35f6)")
@@ -463,13 +461,13 @@ def test_11_one_byte_change_is_hash_mismatch_exit_6(pkg, name, where):
     assert_failed_closed(code, out, err, 6, f"HASH MISMATCH: {name} sha256 ")
 
 
-def test_11b_hash_check_precedes_parsing_and_secret_scan(pkg):
-    # Invalid JSON *and* a token: the hash mismatch must be reported first.
-    p = pkg / "receipt.json"
-    p.write_text("{not json " + "gh" + "p_" + "Ab1" * 12, encoding="utf-8")
+def test_11b_hash_check_precedes_parsing(pkg):
+    # Invalid JSON and invalid UTF-8: the hash mismatch must be reported first,
+    # i.e. the changed file is refused before it is decoded or parsed.
+    (pkg / "receipt.json").write_bytes(b"{not json \xff\xfe")
     code, out, err = run_raw(pkg)
     assert_failed_closed(code, out, err, 6, "HASH MISMATCH: receipt.json")
-    assert "INPUT MALFORMED" not in out and "SECRET-LIKE" not in out
+    assert "INPUT MALFORMED" not in out and "INPUT UNREADABLE" not in out
 
 
 def test_12_missing_manifest_exits_4(pkg):
@@ -550,133 +548,141 @@ def test_14b_known_bypass_with_repin_parser_still_misses(pkg, text):
     assert code != 0 and "SAME STATUS" not in out, out
 
 
-# --- scoped secret scan ------------------------------------------------------
+# --- Round 6: no secret scanner in reproduce.py; no environment dependence --
+# Secret scanning moved to the commit layer (gitleaks, scripts/pre-commit).
+# Fake secret-shaped strings are assembled at runtime so this file carries no
+# literal that gitleaks' default rules would flag.
 
-def fake_pem(kind):
-    body = "\n".join(["MIIEow" + "IBAAKCAQEA" + "q" * 48] * 4)
-    return ("-----BEGIN " + kind + "PRIVATE KEY-----\n" + body +
-            "\n-----END " + kind + "PRIVATE KEY-----")
+import ast
+
+FAKE_TOKEN = "gh" + "p_" + "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hJ6"
+FAKE_PEM_HEADER = "-----BEGIN " + "RSA PRIVATE KEY-----"
+HEX64 = "9f" * 16 + "0a" * 16
+
+SCRIPT_SRC = (REPO / "reproduce.py").read_text(encoding="utf-8")
+SCRIPT_AST = ast.parse(SCRIPT_SRC)
 
 
-FAKE_TOKENS = {
-    "github_token": "gh" + "p_" + "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hJ6",
-    "github_pat": "github" + "_pat_" + "11ABCDEFG0" + "a" * 60,
-    "gho_token": "gh" + "o_" + "Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2",
-    "aws_access_key_id": "AK" + "IA" + "IOSFODNN7EXAMPL9",
-    "slack_token": "xo" + "xb-" + "123456789012-1234567890123-" + "AbCd" * 6,
-    "stripe_live_key": "sk" + "_live_" + "4eC39HqLyjWDarjtT1zdp7dc",
-    "google_api_key": "AI" + "za" + "SyA-" + "x1Y2z3" * 5 + "a",
+def _fail_codes(tree):
+    codes = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "fail"):
+            assert isinstance(node.args[0], ast.Constant), ast.dump(node)
+            codes.add(node.args[0].value)
+    return codes
+
+
+def test_16_reproduce_py_has_no_secret_scan_code_path():
+    # exit codes: fail() is only ever called with 1, 2, 3, 4 or 6 (5 is the
+    # internal-error path in main); there is no exit 7.
+    assert _fail_codes(SCRIPT_AST) == {1, 2, 3, 4, 6}
+    assert "fail(7" not in SCRIPT_SRC.replace(" ", "")
+    # no scanner identifiers
+    names = set()
+    for node in ast.walk(SCRIPT_AST):
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+    bad = [n for n in names if any(w in n.lower() for w in
+           ("secret", "warn", "hex_run", "hash_field", "allowlist", "pure_hex"))]
+    assert bad == []
+    # no scanner strings / patterns outside the module docstring
+    doc = ast.get_docstring(SCRIPT_AST, clean=False)
+    consts = [n.value for n in ast.walk(SCRIPT_AST)
+              if isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value != doc]
+    for needle in ("SECRET", "WARN", "PRIVATE KEY", "AKIA", "ghp", "xox", "sk_live",
+                   "AIza", "BEGIN"):
+        assert not any(needle.lower() in c.lower() for c in consts), needle
+    # no environment access, no config file
+    assert not names & {"environ", "environb", "getenv", "getenvb", "putenv"}
+    assert not any(isinstance(n, (ast.Import, ast.ImportFrom)) and
+                   any(a.name in ("os", "configparser", "argparse") for a in n.names)
+                   for n in ast.walk(SCRIPT_AST))
+
+
+@pytest.mark.parametrize("extra,where", [
+    ("ci credential " + FAKE_TOKEN, "RECEIPT.md"),
+    (FAKE_PEM_HEADER, "RECEIPT.md"),
+    ("source tarball sha: " + HEX64, "RECEIPT.md"),
+    (FAKE_TOKEN, "receipt.json"),
+    (HEX64, "receipt.json"),
+], ids=["token_md", "pem_md", "hex64_md", "token_json", "hex64_json"])
+def test_16b_secret_shaped_content_is_not_inspected_by_reproduce_py(pkg, extra, where):
+    """reproduce.py no longer scans for secrets: with the manifest re-pinned,
+    content the Round-5 scanner blocked (exit 7) or warned on is judged only by
+    the hash pin and the status checks. Output never contains WARN or 'secret'
+    and differs from the genuine run only in the three HASH_PIN hash values."""
+    _, genuine, _ = run(pkg)
+    if where == "RECEIPT.md":
+        append_md(pkg, "\n" + extra + "\n")
+    else:
+        p = pkg / "receipt.json"
+        d = json.loads(p.read_text(encoding="utf-8"))
+        d["note"] = extra
+        p.write_text(json.dumps(d, indent=2), encoding="utf-8")
+    code, out, err = run(pkg)
+    assert code == 0, out + err
+    assert "warn" not in (out + err).lower() and "secret" not in (out + err).lower()
+    g = [l for l in genuine.splitlines() if not l.startswith("HASH_PIN:")]
+    o = [l for l in out.splitlines() if not l.startswith("HASH_PIN:")]
+    assert o == g
+
+
+def test_16c_failure_outputs_never_mention_warn_or_secret(pkg):
+    outs = []
+    for mutate in (lambda: None,
+                   lambda: append_md(pkg, "\n" + FAKE_TOKEN + "\n"),  # no repin: 6
+                   lambda: (pkg / MANIFEST).unlink()):                # 4
+        mutate()
+        code, out, err = run_raw(pkg)
+        assert code in (0, 1, 2, 3, 4, 5, 6)
+        outs.append(out + err)
+    assert all("warn" not in o.lower() and "secret" not in o.lower() for o in outs)
+
+
+ENV_SETS = {
+    "PYTHONIOENCODING_ascii": {"PYTHONIOENCODING": "ascii"},
+    "PYTHONIOENCODING_cp1252": {"PYTHONIOENCODING": "cp1252"},
+    "PYTHONIOENCODING_latin1": {"PYTHONIOENCODING": "latin-1"},
+    "LANG_C": {"LANG": "C", "LC_ALL": "C"},
+    "LC_ALL_C.UTF-8": {"LC_ALL": "C.UTF-8"},
+    "PYTHONUTF8_1": {"PYTHONUTF8": "1"},
+    "PYTHONUTF8_0": {"PYTHONUTF8": "0"},
+    "PYTHONHASHSEED_0": {"PYTHONHASHSEED": "0"},
+    "PYTHONHASHSEED_12345": {"PYTHONHASHSEED": "12345"},
+    "TZ": {"TZ": "Pacific/Kiritimati"},
+    "CI": {"CI": "true", "GITHUB_ACTIONS": "true"},
+    "GITLEAKS": {"GITLEAKS_CONFIG": "/nonexistent.toml", "GITLEAKS_CONFIG_TOML": "x"},
+    "TERM": {"TERM": "dumb", "NO_COLOR": "1", "COLUMNS": "20"},
+    "HOME": {"HOME": "/nonexistent"},
+    "made_up_flags": {"QPF_SKIP_HASH": "1", "SKIP_HASH_PIN": "1",
+                      "SKIP_SECRET_SCAN": "1", "REPRODUCE_DEBUG": "1",
+                      "QPF_ALLOW_UNPINNED": "1"},
 }
 
 
-@pytest.mark.parametrize("kind", ["", "RSA ", "OPENSSH ", "EC "])
-@pytest.mark.parametrize("target", ["RECEIPT.md", "receipt.json"])
-def test_15_private_key_block_blocks_exit_7(pkg, kind, target):
-    pem = fake_pem(kind)
-    if target == "RECEIPT.md":
-        append_md(pkg, "\n" + pem + "\n")
-    else:
-        p = pkg / "receipt.json"
-        d = json.loads(p.read_text(encoding="utf-8"))
-        d["note_key"] = pem
-        p.write_text(json.dumps(d, indent=2), encoding="utf-8")
-    code, out, err = run(pkg)  # re-pinned: author pinned it, scan must still block
-    assert_failed_closed(code, out, err, 7, f"SECRET-LIKE CONTENT: ")
-    assert f"in {target} line" in out
-    assert "MIIEow" not in out + err
+def _run_bytes(pkg_dir, env):
+    e = dict(os.environ)
+    e.update(env)
+    p = subprocess.run([sys.executable, str(pkg_dir / "reproduce.py")],
+                       cwd=pkg_dir, capture_output=True, timeout=60, env=e)
+    return p.returncode, p.stdout, p.stderr
 
 
-@pytest.mark.parametrize("name", list(FAKE_TOKENS))
-@pytest.mark.parametrize("target", ["receipt.json", "RECEIPT.md"])
-def test_15b_provider_token_blocks_exit_7(pkg, name, target):
-    tok = FAKE_TOKENS[name]
-    if target == "RECEIPT.md":
-        append_md(pkg, "\nci credential " + tok + "\n")
-    else:
-        p = pkg / "receipt.json"
-        d = json.loads(p.read_text(encoding="utf-8"))
-        d["cells"]["C2"] = d["cells"]["C2"]  # keep schema
-        d["provenance"] = {"uploader": tok}
-        p.write_text(json.dumps(d, indent=2), encoding="utf-8")
-    code, out, err = run(pkg)
-    assert_failed_closed(code, out, err, 7, "SECRET-LIKE CONTENT: ")
-    assert tok not in out + err
-
-
-def test_15c_secret_at_allowlisted_hash_field_still_blocks(pkg):
-    p = pkg / "receipt.json"
-    d = json.loads(p.read_text(encoding="utf-8"))
-    d["source_sha256"] = FAKE_TOKENS["github_token"]
-    p.write_text(json.dumps(d, indent=2), encoding="utf-8")
-    code, out, err = run(pkg)
-    assert_failed_closed(code, out, err, 7, "SECRET-LIKE CONTENT: github_token")
-
-
-HEX64 = "9f" * 16 + "0a" * 16
-HEX40 = "3b" * 10 + "c7" * 10
-
-
-@pytest.mark.parametrize("path,value", [
-    (("source_sha256",), HEX64),
-    (("provenance", "sha256"), HEX64),
-    (("provenance", "data_sha256"), HEX64.upper()),
-    (("provenance", "commit"), HEX40),
-    (("provenance", "git_sha"), HEX40),
-    (("provenance", "pin_commit"), "0x" + HEX40),
-], ids=["source_sha256", "nested_sha256", "upper_sha256", "commit", "git_sha",
-        "0x_commit"])
-def test_16_hash_at_allowlisted_field_passes_silently(pkg, path, value):
-    p = pkg / "receipt.json"
-    d = json.loads(p.read_text(encoding="utf-8"))
-    node = d
-    for k in path[:-1]:
-        node = node.setdefault(k, {})
-    node[path[-1]] = value
-    p.write_text(json.dumps(d, indent=2), encoding="utf-8")
-    code, out, err = run(pkg)
-    assert code == 0, out + err
-    assert "WARN" not in out
-    assert "REPRODUCTION: SAME STATUS" in out
-
-
-@pytest.mark.parametrize("path,value,expect", [
-    (("note",), HEX64, "hex64 at receipt.json $.note"),
-    (("provenance", "commit"), HEX64, "hex64 at receipt.json $.provenance.commit"),
-    (("provenance", "sha256"), HEX40, "hex40 at receipt.json $.provenance.sha256"),
-    (("provenance", "sha256"), HEX64 + " extra", "hex64 at receipt.json $.provenance.sha256"),
-    (("note",), "0x" + HEX64, "hex64 at receipt.json $.note"),
-], ids=["hex64_note", "hex64_at_commit", "hex40_at_sha256", "not_exact",
-        "0x_hex64_note"])
-def test_16b_hash_like_outside_allowlist_warns_only(pkg, path, value, expect):
-    p = pkg / "receipt.json"
-    d = json.loads(p.read_text(encoding="utf-8"))
-    node = d
-    for k in path[:-1]:
-        node = node.setdefault(k, {})
-    node[path[-1]] = value
-    p.write_text(json.dumps(d, indent=2), encoding="utf-8")
-    code, out, err = run(pkg)
-    assert code == 0, out + err
-    assert f"WARN: hash-like value, {expect}" in out
-    assert "REPRODUCTION: SAME STATUS" in out
-
-
-@pytest.mark.parametrize("value,kind", [(HEX64, "hex64"), (HEX40, "hex40")])
-def test_16c_hash_like_in_receipt_md_warns_only(pkg, value, kind):
-    append_md(pkg, "\nsource tarball sha: " + value + "\n")
-    code, out, err = run(pkg)
-    assert code == 0, out + err
-    assert f"WARN: hash-like value, {kind} in RECEIPT.md line" in out
-    assert "REPRODUCTION: SAME STATUS" in out
-
-
-def test_16d_long_hex_run_warns_and_base64_blob_blocks(pkg):
-    # 128 hex digits: exempt from long_base64_secret, so it must still WARN.
-    append_md(pkg, "\nblob " + HEX64 * 2 + "\n")
-    code, out, err = run(pkg)
-    assert code == 0, out + err
-    assert "WARN: hash-like value, hex128 in RECEIPT.md line" in out
-    # A base64 blob with non-hex characters is not hash-like: it still blocks.
-    append_md(pkg, "blob2 " + "Zm9v" + "QmFyQmF6" * 8 + "==\n")
-    code, out, err = run(pkg)
-    assert_failed_closed(code, out, err, 7, "SECRET-LIKE CONTENT: long_base64_secret in RECEIPT.md")
+@pytest.mark.parametrize("name", list(ENV_SETS))
+@pytest.mark.parametrize("case", ["genuine", "hash_mismatch"])
+def test_17_environment_variables_do_not_change_output(pkg, name, case):
+    if case == "hash_mismatch":
+        md = pkg / "RECEIPT.md"
+        b = bytearray(md.read_bytes())
+        b[len(b) // 2] ^= 0x01
+        md.write_bytes(bytes(b))
+    base = _run_bytes(pkg, {})
+    got = _run_bytes(pkg, ENV_SETS[name])
+    assert got[0] == base[0] == (0 if case == "genuine" else 6)
+    assert got[1] == base[1]
+    assert got[2] == base[2] == b""
